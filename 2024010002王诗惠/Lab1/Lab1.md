@@ -15,7 +15,7 @@
 | 学号 |2024010002 |
 | 姓名 |王诗惠 |
 | 班级 |信息安全本科24 |
-| 完成日期 |2026年9月3日 |
+| 完成日期 |2026年9月5日 |
 
 ---
 
@@ -35,8 +35,8 @@ VMware Workstation Pro 26H1 for Windows
 
 | 项目 | 你的填写内容 |
 | :--- | :--- |
-| 已安装的 VMware 完整版本号 | |
-| 是否为教师指定版本 | |
+| 已安装的 VMware 完整版本号 | 26.0.0.25388281|
+| 是否为教师指定版本 | 是|
 
 ![VMware 版本](imgs/lab1-vmware-version.png)
 
@@ -73,8 +73,8 @@ sudo cat /var/log/installer/media-info
 | 项目 | 你的填写内容 |
 | :--- | :--- |
 | Ubuntu 当前完整版本 |Ubuntu 24.04.4 LTS|
-| 安装介质的版本 | x86_64|
-| 处理器架构 | Ubuntu 24.04.4 LTS|
+| 安装介质的版本 | Ubuntu 24.04.4 LTS|
+| 处理器架构 | x86_64|
 | 是否为教师提供的 Ubuntu 24.04.4 LTS Desktop amd64 | 是|
 
 ![Ubuntu 版本](imgs/lab1-ubuntu-version.png)
