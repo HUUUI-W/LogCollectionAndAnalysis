@@ -182,17 +182,19 @@ systemctl show course-memhog.service -p ActiveState -p MemoryMax -p MemorySwapMa
 
 | 检查项 | 本机实测值 |
 | :--- | :--- |
-| cgroup 文件系统类型 | |
-| 整机内存 `available` | |
-| `ActiveState` | |
-| `MemoryMax` | |
-| `MemorySwapMax` | |
+| cgroup 文件系统类型 | `cgroup2fs` |
+| 整机内存 `available` | `4.1Gi`（`free -h`，启动前 2026-11-19 12:03:20 读取） |
+| `ActiveState` | `inactive` |
+| `MemoryMax` | `134217728`（128 MiB，尚未启动时即已加载） |
+| `MemorySwapMax` | `0` |
 
 根据当前观察，在启动服务前回答：
 
 **问题 1**：`available` 和 `MemoryMax` 是否描述同一个资源范围？仅根据这两项读数，能否断定服务一定不会发生内存不足？
 
-> 答：
+> 答：不是同一个资源范围。`available`（4.1Gi）是整台虚拟机的统计，表示操作系统估计还能供新程序使用的内存；`MemoryMax`（134217728 字节 = 128 MiB）是 `course-memhog.service` 所属控制组 `/system.slice/course-memhog.service` 的内存硬上限，只作用于该服务内的进程。
+>
+> 仅凭这两项读数不能断定服务不会内存不足。整机 `available` 还有 4.1Gi 时，服务仍然可以在自己的 128 MiB 限额内先达到上限；整机读数与组内限额是两个不同的统计口径，前者充足并不代表后者充足。
 
 ### 3.2 启动服务并记录退出结果
 
@@ -239,11 +241,13 @@ systemctl show course-memhog.service -p Result -p ExecMainCode -p ExecMainStatus
 
 | 检查项 | 本机实测值 |
 | :--- | :--- |
-| 本次查询起点 `START` | |
-| 服务最终状态 | |
-| `Result` | |
-| `ExecMainCode` | |
-| `ExecMainStatus` | |
+| 本次查询起点 `START` | `2026-11-19 12:03:31` |
+| 服务最终状态 | `failed`，`Active: failed (Result: oom-kill) since Thu 2026-11-19 12:03:50 CST`，`Duration: 8.528s`，`Main PID: 11337 (code=killed, signal=KILL)` |
+| `Result` | `oom-kill` |
+| `ExecMainCode` | `2`（表示主进程被信号终止） |
+| `ExecMainStatus` | `9`（SIGKILL） |
+
+> 说明：本机 systemd 对 OOM 终止给出了更具体的结果值 `oom-kill`，而不是笼统的 `signal`；这与 `status` 摘要中的 `code=killed, signal=KILL` 相互对应。
 
 > **阶段结论要求**：本任务只描述观察到的事实，不要求提前给出完整故障归因。服务退出后继续保留现场，不运行 `restore.sh`，也不要立即重新启动服务。
 
@@ -282,10 +286,10 @@ systemctl show course-memhog.service -p ActiveState -p MemoryMax -p MemorySwapMa
 
 **实验记录 3：服务配置**
 
-- `ExecStart` 的实际值：
-- `MemoryMax` 的配置值及加载值：
-- `MemorySwapMax` 的实际值：
-- `OOMPolicy` 的实际值：
+- `ExecStart` 的实际值：`/usr/local/bin/course-memhog.py`（另有 `ExecStartPre=/usr/bin/grep -Fxq 134217728 /sys/fs/cgroup/system.slice/%n/memory.max` 与两条 `ExecStopPost`，分别用于保存 cgroup 统计和向 syslog 发送退出摘要）
+- `MemoryMax` 的配置值及加载值：配置 `MemoryMax=128M`；`systemctl show` 加载值 `MemoryMax=134217728`（128 × 1024 × 1024），配置与加载值一致
+- `MemorySwapMax` 的实际值：`0`
+- `OOMPolicy` 的实际值：`stop`（同时 `ActiveState=failed`，确认读取的是首次异常退出后的状态）
 
 ### 4.2 根据现有源码推断内存变化
 
@@ -339,9 +343,11 @@ sudo journalctl -b -u course-memhog.service --since "$START" -o short-iso --no-p
 
 | 记录项 | 时间 | PID | 日志原文或累计量 |
 | :--- | :--- | :--- | :--- |
-| 最早一条 `allocated` | | | |
-| 倒数第二条 `allocated` | | | |
-| 最后一条 `allocated` | | | |
+| 最早一条 `allocated` | 2026-11-19T12:03:41+08:00 | 11337 | `course-memhog.py[11337]: allocated 8 MiB` |
+| 倒数第二条 `allocated` | 2026-11-19T12:03:48+08:00 | 11337 | `course-memhog.py[11337]: allocated 112 MiB` |
+| 最后一条 `allocated` | 2026-11-19T12:03:49+08:00 | 11337 | `course-memhog.py[11337]: allocated 120 MiB` |
+
+> 说明：最后一条只能证明累计已成功创建 120 MiB 数据块，第 16 次申请（128 MiB）是否成功、是否在打印前即被终止，日志无法证明，因此不能把它当作被终止瞬间的精确用量。
 
 ### 4.4 用内核 journal 判断退出原因
 
@@ -382,20 +388,33 @@ Memory cgroup out of memory: Killed process 4120 (python3) …
 
 | 检查项 | 本次实际证据 |
 | :--- | :--- |
-| 服务分配日志中的 PID | |
-| 内核终止记录中的 PID | |
-| 内核 OOM 约束字段 | |
-| 内核控制组路径 | |
-| 服务 `Result` | |
-| 主进程退出方式和状态 | |
+| 服务分配日志中的 PID | `11337`（`course-memhog.py[11337]`，12:03:41–12:03:49 全部同此 PID） |
+| 内核终止记录中的 PID | `11337`（`Killed process 11337 (python3)`，同一行 `pid=11337`） |
+| 内核 OOM 约束字段 | `constraint=CONSTRAINT_MEMCG` |
+| 内核控制组路径 | `oom_memcg=/system.slice/course-memhog.service`，`task_memcg=/system.slice/course-memhog.service` |
+| 服务 `Result` | `oom-kill` |
+| 主进程退出方式和状态 | `ExecMainCode=2`（信号终止），`ExecMainStatus=9`（SIGKILL），journal 中为 `Main process exited, code=killed, status=9/KILL` |
 
 粘贴能够同时支持进程标识和约束范围判断的**内核原始日志**：
 
 > 日志：
+>
+> ```text
+> 2026-11-19T12:03:49+08:00 zym-VMware-Virtual-Platform kernel: python3 invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score_adj=0
+> 2026-11-19T12:03:49+08:00 zym-VMware-Virtual-Platform kernel: oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=/,mems_allowed=0,oom_memcg=/system.slice/course-memhog.service,task_memcg=/system.slice/course-memhog.service,task=python3,pid=11337,uid=0
+> 2026-11-19T12:03:49+08:00 zym-VMware-Virtual-Platform kernel: Memory cgroup out of memory: Killed process 11337 (python3) total-vm:151752kB, anon-rss:130712kB, file-rss:6964kB, shmem-rss:0kB, UID:0 pgtables:332kB oom_score_adj:0
+> ```
 
 **问题 2**：本次服务退出是否可以归因为控制组范围内的 OOM？请引用至少两项相互独立、能够对应到同一次运行的证据进行说明。
 
-> 答：
+> 答：可以归因为控制组范围内的 OOM。以下证据相互独立，且都能对应到 `START=2026-11-19 12:03:31` 之后的同一次运行：
+>
+> 1. **内核日志（约束范围）**：12:03:49 的记录为 `oom-kill:constraint=CONSTRAINT_MEMCG,…,oom_memcg=/system.slice/course-memhog.service,…,task=python3,pid=11337`，紧接着是 `Memory cgroup out of memory: Killed process 11337 (python3)`。`CONSTRAINT_MEMCG` 说明内核是在内存控制组范围、而不是整机范围内判定内存不足并执行终止的。
+> 2. **服务日志（进程标识与时间）**：同一次运行的分配记录全部来自 `course-memhog.py[11337]`，最后一条为 12:03:49 的 `allocated 120 MiB`，与内核终止记录中的 `pid=11337` 完全一致，时间也落在内核记录前后数秒内。
+> 3. **systemd 与 syslog（服务结果）**：`Result=oom-kill`、`ExecMainCode=2`、`ExecMainStatus=9`，并且 `course-memhog-result` 摘要为 `result=oom-kill exit_code=killed exit_status=KILL`；该结果值与内核 OOM 终止的判断一致，而不是普通的 `SIGTERM` 停止。
+> 4. **cgroup 计数器（内核侧统计）**：`memory.events:oom 1`、`memory.events:oom_kill 1`、`memory.peak:134217728`，峰值正好等于 `MemoryMax` 的 128 MiB 上限，说明该组是用量顶到限额后才发生 OOM 的。
+>
+> 需要强调的是：单看 `failed` 或 `SIGKILL` 不足以认定 OOM，真正的判据是内核日志中的 `CONSTRAINT_MEMCG` 与 `oom_memcg=/system.slice/course-memhog.service`，以及 PID 11337 在服务日志与内核日志之间的一致对应。
 
 **截图 1：故障证据。** 在一张图中呈现服务退出结果以及本次内核 OOM 记录。应能辨认服务名称、进程名、PID 和触发约束的关键信息；允许将两段终端输出拼为一张图。
 
@@ -446,12 +465,25 @@ sudo journalctl -b -u course-memhog.service --since "$START" --no-pager | grep -
 粘贴包含上述字段的原始日志行：
 
 > 原始输出：
+>
+> ```text
+> Nov 19 12:03:49 zym-VMware-Virtual-Platform grep[11340]: /sys/fs/cgroup/system.slice/course-memhog.service/memory.events:low 0
+> Nov 19 12:03:49 zym-VMware-Virtual-Platform grep[11340]: /sys/fs/cgroup/system.slice/course-memhog.service/memory.events:high 0
+> Nov 19 12:03:49 zym-VMware-Virtual-Platform grep[11340]: /sys/fs/cgroup/system.slice/course-memhog.service/memory.events:max 39
+> Nov 19 12:03:49 zym-VMware-Virtual-Platform grep[11340]: /sys/fs/cgroup/system.slice/course-memhog.service/memory.events:oom 1
+> Nov 19 12:03:49 zym-VMware-Virtual-Platform grep[11340]: /sys/fs/cgroup/system.slice/course-memhog.service/memory.events:oom_kill 1
+> Nov 19 12:03:49 zym-VMware-Virtual-Platform grep[11340]: /sys/fs/cgroup/system.slice/course-memhog.service/memory.events:oom_group_kill 0
+> Nov 19 12:03:49 zym-VMware-Virtual-Platform grep[11340]: /sys/fs/cgroup/system.slice/course-memhog.service/memory.events:sock_throttled 0
+> Nov 19 12:03:49 zym-VMware-Virtual-Platform grep[11340]: /sys/fs/cgroup/system.slice/course-memhog.service/memory.peak:134217728
+> ```
 
 | 指标 | 本次实测值 | 单位 |
 | :--- | :--- | :--- |
-| `oom` | | 次 |
-| `oom_kill` | | 个进程 |
-| `memory.peak` | | 字节或 MiB（注明换算） |
+| `oom` | 1 | 次 |
+| `oom_kill` | 1 | 个进程 |
+| `memory.peak` | `134217728`，即 `134217728 ÷ 1048576 = 128 MiB` | 字节（附 MiB 换算） |
+
+> 补充读法：`max 39` 表示该组先后 39 次触到硬上限并尝试回收/节流，`high 0` 说明没有配置 `memory.high` 压力档，最终仍以 `oom 1`、`oom_kill 1` 收场。这些数值由内核统计，与程序打印的 `allocated 120 MiB` 不是同一指标。
 
 > **阶段结论要求**：任务二完成后，应能分别回答“程序如何持续增加内存保留量”“内存限制作用于何处”“哪个进程被终止”。这三个问题的证据来源不同，报告中不要将它们混为单一结论。
 
@@ -505,7 +537,14 @@ course-memhog-result: unit=course-memhog.service result=<服务结果> exit_code
 
 > 本机查询结果：
 >
-> 对应的时间与服务结果：
+> ```text
+> 2026-11-19T09:52:34.555156+08:00 zym-VMware-Virtual-Platform course-memhog-result: unit=course-memhog.service result=success exit_code=killed exit_status=TERM
+> 2026-11-19T12:03:49.999325+08:00 zym-VMware-Virtual-Platform course-memhog-result: unit=course-memhog.service result=oom-kill exit_code=killed exit_status=KILL
+> ```
+>
+> 对应的时间与服务结果：本次运行对应 **2026-11-19T12:03:49.999325+08:00** 这一条，`result=oom-kill`、`exit_code=killed`、`exit_status=KILL`，与实验记录 2 中的 `Result=oom-kill`、`ExecMainCode=2`、`ExecMainStatus=9` 一一对应（数字 `2`/`9` 分别以 `killed`/`KILL` 的文本形式呈现）。
+>
+> 上一条 09:52:34 的记录属于更早的一次试运行（`exit_status=TERM`），不属于本次故障，因此必须按时间挑选，不能只看服务名。
 
 ### 5.3 在 Grafana 中查询相同事件
 
@@ -531,11 +570,13 @@ course-memhog-result: unit=course-memhog.service result=<服务结果> exit_code
 
 | 项目 | 实际结果 |
 | :--- | :--- |
-| Grafana 查询时间范围 | |
+| Grafana 查询时间范围 | 2026-11-19 12:00:00 — 12:10:00（覆盖首次启动 12:03:40 至退出 12:03:50） |
 | 使用的 LogQL | `{job="syslog"} |= "course-memhog-result" |= "unit=course-memhog.service"` |
-| 命中记录的 `host` | |
-| 本次退出摘要原文 | |
-| 与本机记录的对应依据 | |
+| 命中记录的 `host` | `zym-VMware-Virtual-Platform`（流标签为 `job="syslog"`、`filename="/var/log/syslog"`） |
+| 本次退出摘要原文 | `2026-11-19T12:03:49.999325+08:00 zym-VMware-Virtual-Platform course-memhog-result: unit=course-memhog.service result=oom-kill exit_code=killed exit_status=KILL` |
+| 与本机记录的对应依据 | 该查询在该时间窗内只返回 1 条记录（`totalEntriesReturned: 1`），时间戳 12:03:49.999325 落在服务退出时刻，`result/exit_code/exit_status` 三项与 `systemctl show` 及本机 `/var/log/syslog` 完全一致，`host` 为本机主机名 |
+
+> 采集链路状态：`systemctl is-active rsyslog alloy loki grafana-server` 四项均返回 `active`，`curl -sS http://127.0.0.1:3100/ready` 返回 `ready`。查询语句与 Grafana Explore（Loki 数据源，Code 模式）使用的是同一条 LogQL，上述结果由 Loki 的查询接口返回，可用于核对该次退出摘要已经通过 Alloy 进入 Loki。
 
 如果查询为空，应分别记录：本机 syslog 是否存在该行、Grafana 的时间范围是否正确、组件状态如何，以及问题可能位于哪一段采集链路。查询为空本身并不否定任务二已经取得的本机 OOM 证据。
 
@@ -677,16 +718,16 @@ cat "$CG/memory.events"
 
 | 对照项 | 原程序首次运行 | 修改后第二次运行 |
 | :--- | :--- | :--- |
-| `MemoryMax` | | |
-| `MemorySwapMax` | | |
-| 第二次查询起点 `FIX_START` | 不适用 | |
-| 每轮申请大小 | | |
-| 数据块保留方式 | | |
-| 可确认的运行时长 | | |
-| 最后一次观察到的累计 `allocated` | | |
-| 运行状态 / 退出结果 | | |
-| `memory.current`（运行中） | 不适用，若未实时采样则填写“未取得” | |
-| `oom_kill` | | |
+| `MemoryMax` | `134217728`（128 MiB） | `134217728`（128 MiB，未改变） |
+| `MemorySwapMax` | `0` | `0`（未改变） |
+| 第二次查询起点 `FIX_START` | 不适用 | `2026-11-19 12:05:37` |
+| 每轮申请大小 | 8 MiB（`bytearray(8 * 1024 * 1024)`） | 8 MiB（未改变） |
+| 数据块保留方式 | `chunks = []`，列表持有全部数据块，永不释放 | `chunks = deque(maxlen=4)`，最多保留 4 个数据块 |
+| 可确认的运行时长 | 约 8.5 秒（12:03:41 首次分配 → 12:03:49 终止；`Duration: 8.528s`） | 至少 71 秒（12:05:38 首次分配 → 12:06:49 最后一次观察到的分配），查询时仍在运行 |
+| 最后一次观察到的累计 `allocated` | `120 MiB` | `2808 MiB`（PID 11977，12:06:49），之后仍在继续增长 |
+| 运行状态 / 退出结果 | `failed`，`Result=oom-kill`，`ExecMainStatus=9` | `ActiveState=active`（查询时仍在运行），无新的退出记录 |
+| `memory.current`（运行中） | 不适用（首次未实时采样） | `45555712` 字节 ≈ 43.4 MiB（12:06:48 读取，同一运行中另一次读到 `45813760` 字节 ≈ 43.7 MiB） |
+| `oom_kill` | `1`（`memory.events:oom_kill 1`） | `0`（运行中 `memory.events` 为 `oom 0`、`oom_kill 0`；`memory.peak` 仅 `46075904` 字节 ≈ 43.9 MiB） |
 
 **问题 3**：第二次运行是否满足以下验证条件？逐项给出实际证据。
 
@@ -695,9 +736,14 @@ cat "$CG/memory.events"
 3. 第二次运行的当前内存用量低于所配置的硬上限。
 4. 第二次运行期间没有发现新的 OOM 终止；如果取得了 `oom_kill`，应核对其值。
 
-> 验证结果：
+> 验证结果：四项条件均满足。
 >
 > 证据说明：
+>
+> 1. **限额相同**：第二次运行中 `systemctl show course-memhog.service -p MemoryMax -p MemorySwapMax` 仍为 `MemoryMax=134217728`、`MemorySwapMax=0`，与首次运行完全一致；`ControlGroup=/system.slice/course-memhog.service` 也保持不变。两次运行之间只修改了 `/usr/local/bin/course-memhog.py` 的数据保留方式（`diff` 显示仅新增 `from collections import deque` 与 `chunks = deque(maxlen=4)` 两处），服务单元配置文件未改动。
+> 2. **持续分配且观察时长更长**：第二次运行的分配记录从 12:05:38 的 `allocated 8 MiB` 持续增长到 12:06:49 的 `allocated 2808 MiB`（PID 11977），可确认时长约 71 秒，而首次运行从首次分配到被终止仅 8.5 秒左右。若仍按原逻辑，70 秒内累计分配量早已远超 128 MiB 限额。
+> 3. **当前用量低于硬上限**：12:06:48 读取 `/sys/fs/cgroup/system.slice/course-memhog.service/memory.current` 为 `45555712` 字节（约 43.4 MiB），`memory.max` 为 `134217728` 字节（128 MiB），当前用量约为上限的 34%。
+> 4. **无新的 OOM 终止**：同一时刻 `memory.events` 中 `oom 0`、`oom_kill 0`、`max 0`，`memory.peak` 仅 `46075904` 字节（约 43.9 MiB），远低于 128 MiB；本次运行的 journal 中也没有出现新的 `oom-kill` 或 `Killed process` 记录。
 
 在这些条件得到证据支持时，可以得出：**在本次观察窗口及相同限额条件下，修改后的程序未复现原故障，并持续完成内存分配。**这不等于已经证明该程序在任意负载、任意时长下都不会出现内存问题。
 
@@ -727,7 +773,14 @@ systemctl is-active course-memhog.service
 
 > `restore.sh` 的执行结果：
 >
-> 清理后的服务状态：
+> ```text
+> [Lab11] 已删除实验新建的 /etc/systemd/system/course-memhog.service
+> [Lab11] 已删除实验新建的 /usr/local/bin/course-memhog.py
+> [Lab11] 已移除 Lab11 的 course-memhog 服务与脚本。
+> [Lab11] journal、dmesg 中的 OOM 记录保留，供报告和复盘使用。
+> ```
+>
+> 清理后的服务状态：`systemctl is-active course-memhog.service` 返回 `inactive`；`/etc/systemd/system/course-memhog.service` 与 `/usr/local/bin/course-memhog.py` 均已不存在。journal 中两次运行的日志与内核 OOM 记录仍然保留，本报告的证据均取自清理前的实际输出。
 
 ---
 
@@ -779,10 +832,12 @@ sudo journalctl -b -k --since "$START" --until "$FIX_START" -o short-iso --no-pa
 
 | 顺序 | 实际时刻 | 来源 | 关键原文或摘要 |
 | :--- | :--- | :--- | :--- |
-| 1 | | 服务 journal | 最早一次成功分配 |
-| 2 | | 服务 journal | 最后一次成功分配 |
-| 3 | | 内核 journal | 进程被终止 |
-| 4 | | 服务 journal / systemd | 服务退出结果 |
+| 1 | 2026-11-19T12:03:41+08:00 | 服务 journal | `course-memhog.py[11337]: allocated 8 MiB`（最早一次成功分配） |
+| 2 | 2026-11-19T12:03:49+08:00 | 服务 journal | `course-memhog.py[11337]: allocated 120 MiB`（最后一次成功分配，PID 与第 1 行相同） |
+| 3 | 2026-11-19T12:03:49+08:00 | 内核 journal | `oom-kill:constraint=CONSTRAINT_MEMCG,…,oom_memcg=/system.slice/course-memhog.service,task=python3,pid=11337`；`Memory cgroup out of memory: Killed process 11337 (python3) total-vm:151752kB, anon-rss:130712kB` |
+| 4 | 2026-11-19T12:03:49+08:00 / 12:03:50+08:00 | 服务 journal / systemd | `course-memhog.service: Main process exited, code=killed, status=9/KILL`；`course-memhog-result: unit=course-memhog.service result=oom-kill exit_code=killed exit_status=KILL`；`Failed with result 'oom-kill'`（`Result=oom-kill`、`ExecMainStatus=9`） |
+
+> 说明：`START=2026-11-19 12:03:31` 只是查询起点，第一次成功分配发生在 12:03:41。第 2、3、4 行日志中时间显示为同一秒（12:03:49），这里保留原始时间，不补写毫秒；先后顺序由日志行序与 `Duration: 8.528s` 支持的“分配 → 终止 → 退出记录”关系确定。
 
 `START` 只是日志查询起点，并不等于程序第一次成功分配的时间。若多个事件在日志中显示为同一秒，应保留实际时间；不能为使顺序更明显而编造毫秒数。
 
@@ -800,7 +855,7 @@ sudo journalctl -b -k --since "$START" --until "$FIX_START" -o short-iso --no-pa
 
 | When（时间） | Where（虚拟机、控制组） | Who（进程、PID） | What（触发条件和内核动作） | Result（服务结果） |
 | :--- | :--- | :--- | :--- | :--- |
-| | | | | |
+| 2026-11-19 12:03:41 — 12:03:49（约 8.5 秒） | 虚拟机 `zym-VMware-Virtual-Platform`（192.168.30.128）；控制组 `/system.slice/course-memhog.service` | `python3`（服务日志中显示为 `course-memhog.py`），PID `11337` | 程序每轮新建 8 MiB 数据块并全部保留在 `chunks` 列表中，组内用量持续增长，触到 `MemoryMax=134217728`；内核以 `constraint=CONSTRAINT_MEMCG`、`oom_memcg=/system.slice/course-memhog.service` 判定控制组内存不足并执行 `Killed process 11337` | `failed`，`Result=oom-kill`，`ExecMainCode=2`，`ExecMainStatus=9`（`code=killed, signal=KILL`）；syslog 摘要 `result=oom-kill exit_code=killed exit_status=KILL` |
 
 ### 7.3 给出完整故障结论
 
@@ -826,7 +881,7 @@ sudo journalctl -b -k --since "$START" --until "$FIX_START" -o short-iso --no-pa
 
 **实验结论**
 
-> 答：
+> 答：`/usr/local/bin/course-memhog.py` 每 0.2 秒新建一个 8 MiB 的 `bytearray`，并用 `chunks.append(...)` 把它们全部保存在列表中，因此进程占用的内存只增不减；而该程序是通过 `course-memhog.service` 启动的，服务单元配置了 `MemoryMax=128M`（加载值 134217728 字节）和 `MemorySwapMax=0`，限制作用在 `/system.slice/course-memhog.service` 这个控制组上，而不是整台虚拟机，所以整机 `available` 仍有 4.1Gi 时服务照样会先触顶。首次运行中，程序从 12:03:41 的 `allocated 8 MiB` 一路打印到 12:03:49 的 `allocated 120 MiB`，随后内核日志给出 `oom-kill:constraint=CONSTRAINT_MEMCG,…,oom_memcg=/system.slice/course-memhog.service,task=python3,pid=11337` 与 `Memory cgroup out of memory: Killed process 11337 (python3)`，把“用量增长—限额触顶—控制组内 OOM 终止”三者联系在同一次运行、同一个 PID 上；systemd 随后记录 `Main process exited, code=killed, status=9/KILL` 与 `Result=oom-kill`、`ExecMainStatus=9`，`memory.events` 中的 `oom 1`、`oom_kill 1`、`memory.peak:134217728` 进一步说明该组确实顶到硬上限后才被终止。修复时保持服务单元、限额、每轮 8 MiB 与 0.2 秒间隔全部不变，只把 `chunks = []` 改为 `chunks = deque(maxlen=4)`，使容器最多保留最近 4 个数据块、旧块可被回收；第二次运行（12:05:38 起）在同样 128 MiB 限额下持续运行 71 秒以上，累计 `allocated` 达到 2808 MiB，而 `memory.current` 仅约 43.4 MiB、`memory.peak` 约 43.9 MiB，`oom_kill` 为 0，服务一直处于 `active`，原故障未复现。由此可以确认：本实验的内存限制作用于服务所在的控制组，OOM 终止可由内核日志中的约束字段与 PID 对应关系确认，而在不提高限额的前提下，仅改变数据保留方式即可让服务持续运行；该结论的适用范围是本实验的观察窗口与负载条件，不等于程序在任何时长、任何负载下都不会出现内存问题。
 
 ---
 
