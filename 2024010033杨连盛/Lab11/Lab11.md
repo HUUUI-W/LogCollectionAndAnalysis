@@ -182,11 +182,11 @@ systemctl show course-memhog.service -p ActiveState -p MemoryMax -p MemorySwapMa
 
 | 检查项 | 本机实测值 |
 | :--- | :--- |
-| cgroup 文件系统类型 | `cgroup2fs`
-| 整机内存 `available` | `4.1Gi`（`free -h` 的 `Mem:` 行 `available` 列；总内存 5.7Gi，used 1.6Gi）
-| `ActiveState` | `inactive`
-| `MemoryMax` | `134217728` 字节（= 128 MiB）
-| `MemorySwapMax` | `0`
+| cgroup 文件系统类型 | `cgroup2fs` |
+| 整机内存 `available` | `4.1Gi`（`free -h` 的 `Mem:` 行 `available` 列；总内存 5.7Gi，used 1.6Gi） |
+| `ActiveState` | `inactive` |
+| `MemoryMax` | `134217728` 字节（= 128 MiB） |
+| `MemorySwapMax` | `0` |
 
 根据当前观察，在启动服务前回答：
 
@@ -239,11 +239,11 @@ systemctl show course-memhog.service -p Result -p ExecMainCode -p ExecMainStatus
 
 | 检查项 | 本机实测值 |
 | :--- | :--- |
-| 本次查询起点 `START` | `2026-11-26 13:15:15`（CST，与后续 journal 时间范围对应）
-| 服务最终状态 | `Active: failed (Result: oom-kill)`；主进程 PID 4203 `code=killed, signal=KILL`；`Duration: 3.380s`
-| `Result` | `oom-kill`（systemd 直接记录了 OOM 终止结果）
-| `ExecMainCode` | `2`
-| `ExecMainStatus` | `9`（对应 `SIGKILL`，与 `status` 中的 `signal=KILL` 一致）
+| 本次查询起点 `START` | `2026-11-26 13:15:15`（CST，与后续 journal 时间范围对应） |
+| 服务最终状态 | `Active: failed (Result: oom-kill)`；主进程 PID 4203 `code=killed, signal=KILL`；`Duration: 3.380s` |
+| `Result` | `oom-kill`（systemd 直接记录了 OOM 终止结果） |
+| `ExecMainCode` | `2` |
+| `ExecMainStatus` | `9`（对应 `SIGKILL`，与 `status` 中的 `signal=KILL` 一致） |
 
 > 说明：本机实测的 `Result=oom-kill`、`ExecMainCode=2` 与文档表格中的常见示例（`signal`、`1`）不同，这是 systemd 直接识别并记录了控制组 OOM 的结果，以本机实测为准。
 
@@ -385,12 +385,12 @@ Memory cgroup out of memory: Killed process 4120 (python3) …
 
 | 检查项 | 本次实际证据 |
 | :--- | :--- |
-| 服务分配日志中的 PID | `4203`（journal 中所有 `allocated` 记录均为 `course-memhog.py[4203]`）
-| 内核终止记录中的 PID | `4203`（`Killed process 4203 (python3)`、`task=python3,pid=4203`）
-| 内核 OOM 约束字段 | `constraint=CONSTRAINT_MEMCG`（明确为内存控制组范围，而非整机 OOM）
-| 内核控制组路径 | `oom_memcg=/system.slice/course-memhog.service`（`task_memcg` 同为该路径）
-| 服务 `Result` | `oom-kill`
-| 主进程退出方式和状态 | `ExecMainCode=2`，`ExecMainStatus=9`；`status` 显示 `code=killed, signal=KILL`（SIGKILL）
+| 服务分配日志中的 PID | `4203`（journal 中所有 `allocated` 记录均为 `course-memhog.py[4203]`） |
+| 内核终止记录中的 PID | `4203`（`Killed process 4203 (python3)`、`task=python3,pid=4203`） |
+| 内核 OOM 约束字段 | `constraint=CONSTRAINT_MEMCG`（明确为内存控制组范围，而非整机 OOM） |
+| 内核控制组路径 | `oom_memcg=/system.slice/course-memhog.service`（`task_memcg` 同为该路径） |
+| 服务 `Result` | `oom-kill` |
+| 主进程退出方式和状态 | `ExecMainCode=2`，`ExecMainStatus=9`；`status` 显示 `code=killed, signal=KILL`（SIGKILL） |
 
 粘贴能够同时支持进程标识和约束范围判断的**内核原始日志**（`journalctl -b -k --since "$START" -o short-iso --no-pager | grep -Ei 'oom|out of memory|killed process'` 实测输出）：
 
